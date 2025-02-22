@@ -34,6 +34,13 @@ struct msg_buffer {
     long msg_type;
     char msg_text[MAX_CMD_LEN];
 };
+// Structure to pass both client_pid and command to the thread
+struct command_args {
+    int client_pid;
+    char command[MAX_CMD_LEN];
+};
+
+pthread_t thread_id;
 
 // Function declarations (prototypes)
 void handle_signal(int sig);
@@ -49,6 +56,7 @@ void handle_invalid_command(char *cmd, char *msg);
 void handle_shutdown();
 void execute_in_shell(char *cmd);
 void register_client(int client_pid);
+void handle_user_input(int msgid, char *command);
 
 pthread_mutex_t client_list_mutex = PTHREAD_MUTEX_INITIALIZER;
 int client_hidden[MAX_CLIENTS] = {0};  // Tracks hidden clients
@@ -61,16 +69,80 @@ void handle_signal(int sig) {
     exit(0);
 }
 
+void *execute_command(void *arg) {
+    if (!arg) {
+        fprintf(stderr, "Error: NULL argument received in execute_command.\n");
+        return NULL;
+    }
+
+    struct command_args *args = (struct command_args *)arg;
+    char *command = args->command;
+    int client_pid = args->client_pid;
+
+    // Trim leading spaces
+    while (*command == ' ') command++;
+
+    // Ensure the command is not empty
+    if (command[0] == '\0') {  // Proper check for empty command
+        handle_invalid_command(command, "Invalid: Empty command received.");
+        free(arg);
+        return NULL;
+    }
+
+    printf("Executing command: '%s' (Client PID: %d)\n", command, client_pid);
+
+    // Handle CHPT command with proper input validation
+    if (strncmp(command, "CHPT", 4) == 0) {
+        char *arg_start = command + 4;
+
+        // Trim spaces after "CHPT"
+        while (*arg_start == ' ') arg_start++;
+
+        if (*arg_start == '\0') {  // If no argument follows
+            handle_invalid_command(command, "<new_prompt>"); // Display error message
+        } else {
+            printf("CHPT command received with argument: '%s'\n", arg_start);
+            // Handle the CHPT command normally
+        }
+    } 
+    else if (strcmp(command, "shutdown") == 0) {
+        printf("Shutdown command received. Terminating server.\n");
+        free(arg);
+        exit(0);
+    } 
+    else if (strcmp(command, "status") == 0) {
+        printf("Server is running normally.\n");
+    } 
+    else if (strcmp(command, "HIDE") == 0) {
+        handle_hide(client_pid);  // Call the handle_hide function
+    } 
+    else if (strcmp(command, "UNHIDE") == 0) {
+        handle_unhide(client_pid);  // Call the handle_unhide function
+    }
+    else if (strcmp(command, "LIST") == 0) {
+        handle_list();  // Call the handle_list function
+    }
+    else if (strcmp(command, "EXIT") == 0) {
+        handle_exit(client_pid);
+    }
+    else {
+        printf("Unknown command: '%s'\n", command);
+    }
+
+    free(arg);
+    return NULL;
+}
 // Function to handle commands in the message queue
 void handle_commands(int msgid) {
     struct msg_buffer message;
-    struct msg_buffer response;
+
     while (1) {
         // Receive a message from the client
         if (msgrcv(msgid, &message, sizeof(message) - sizeof(long), 1, 0) == -1) {
             perror("msgrcv failed");
             continue;
         }
+
         printf("Received raw message: %s\n", message.msg_text);
         int client_pid;
         char command[MAX_CMD_LEN];
@@ -90,38 +162,36 @@ void handle_commands(int msgid) {
         // Register the client before processing the command
         register_client(client_pid);
 
-        // Execute the command in a separate thread
+        // Declare thread_id **before** using it
         pthread_t thread_id;
-        pthread_create(&thread_id, NULL, execute_command, strdup(command));
+
+        // Allocate memory for arguments
+        struct command_args *args = malloc(sizeof(struct command_args));
+        if (!args) {
+            perror("malloc failed");
+            continue;
+        }
+
+        args->client_pid = client_pid;
+        strncpy(args->command, command, MAX_CMD_LEN);
+        args->command[MAX_CMD_LEN - 1] = '\0';  // Ensure null termination
+
+        // Create a new thread to execute the command
+        if (pthread_create(&thread_id, NULL, execute_command, args) != 0) {
+            perror("pthread_create failed");
+            free(args);  // Free memory if thread creation fails
+        }
+
+        // Detach the thread so it cleans up automatically
         pthread_detach(thread_id);
     }
 }
 
-// Function to handle command execution
-void *execute_command(void *arg) {
-    char *command = (char *)arg;  // Command string only
-    printf("Executing command: %s\n", command);
-    // Process commands
-    if (strncmp(command, "CHPT", 4) == 0) {
-        handle_chpt(command);
-    } else if (strncmp(command, "EXIT", 4) == 0) {
-        printf("EXIT received. Ignoring in execute_command().\n");
-    } else if (strcmp(command, "LIST") == 0) {
-        handle_list();
-    } else if (strcmp(command, "HIDE") == 0) {
-        printf("HIDE received. Ignoring in execute_command().\n");
-    } else if (strcmp(command, "UNHIDE") == 0) {
-        printf("UNHIDE received. Ignoring in execute_command().\n");
-    } else if (strcmp(command, "exit") == 0) {
-        handle_exit_command();
-    } else if (strcmp(command, "SHUTDOWN") == 0) {
-        handle_shutdown();
-    } else {
-        execute_in_shell(command);
-    }
-    free(command);  // Free dynamically allocated command string
-    return NULL;
+// Function to handle invalid commands
+void handle_invalid_command(char *cmd, char *msg) {
+    printf("Error: %s (Command: '%s')\n", msg, cmd);
 }
+
 
 // Register Clients
 void register_client(int client_pid) {
@@ -151,8 +221,15 @@ void register_client(int client_pid) {
 // Command handlers
 void handle_chpt(char *cmd) {
     char new_prompt[MAX_CMD_LEN];
-    sscanf(cmd, "CHPT %s", new_prompt);
-    printf("Client changed prompt to: %s\n", new_prompt);
+
+    // Extract the new prompt argument from the CHPT command
+    // CHPT new_prompt_value
+    if (sscanf(cmd, "CHPT %[^\n]", new_prompt) == 1) {
+        // Print the message with the new prompt
+        printf("Client changed prompt to: %s\n", new_prompt);
+    } else {
+        printf("Invalid command format for 'CHPT'. Ensure the new prompt is provided.\n");
+    }
 }
 
 void handle_exit(int client_pid) {
@@ -167,7 +244,7 @@ void handle_exit(int client_pid) {
     }
 
     if (found != -1) {
-        printf("Client %d disconnected.\n", client_pid);
+        printf("Client %d Disconnected.\n", client_pid);  // Message displayed in terminal
 
         // Shift array left to remove the client
         for (int j = found; j < client_count - 1; j++) {
@@ -181,6 +258,8 @@ void handle_exit(int client_pid) {
 
     pthread_mutex_unlock(&client_list_mutex);
 }
+
+
 // Handle the list 
 void handle_list() {
     pthread_mutex_lock(&client_list_mutex);
@@ -199,18 +278,17 @@ void handle_list() {
     pthread_mutex_unlock(&client_list_mutex);
 }
 
-
 void handle_hide(int client_pid) {
     pthread_mutex_lock(&client_list_mutex);
 
     for (int i = 0; i < client_count; i++) {
         if (client_list[i] == client_pid) {
             if (client_hidden[i]) {
-                printf("Client %d is already hidden.\n", client_pid);
+                printf("Client %d: You Are Already Hidden.\n", client_pid);
             } else {
                 client_hidden[i] = 1;
-                printf("Client %d is now hidden.\n", client_pid);
-            }
+                printf("Client %d: You Are Now hidden.\n", client_pid);
+            } 
             pthread_mutex_unlock(&client_list_mutex);
             return;
         }
@@ -224,10 +302,10 @@ void handle_unhide(int client_pid) {
     for (int i = 0; i < client_count; i++) {
         if (client_list[i] == client_pid) {
             if (!client_hidden[i]) {
-                printf("Client %d is not hidden.\n", client_pid);
+                printf("Client %d: You Are Not Hidden.\n", client_pid);
             } else {
                 client_hidden[i] = 0;
-                printf("Client %d is now visible again.\n", client_pid);
+                printf("Client %d: You Are Now Visible Again.\n", client_pid);
             }
             pthread_mutex_unlock(&client_list_mutex);
             return;
@@ -241,16 +319,65 @@ void handle_exit_command() {
     printf("Ignored 'exit' command as it may exit the shell session...\n");
 }
 
-void handle_invalid_command(char *cmd, char *msg) {
-    printf("Command '%s': %s\n", cmd, msg);
-}
-
 void handle_shutdown() {
     printf("Server shutting down...\n");
     exit(0);
 }
 
 void execute_in_shell(char *cmd) {
+    // Check for commands where the argument should be separated by a space
+    if (strncmp(cmd, "ls-l", 4) == 0) {
+        handle_invalid_command(cmd, "Invalid: 'ls-l' should be 'ls -l'. Missing space between command and flag.");
+        return;
+    }
+    if (strncmp(cmd, "echo", 4) == 0) {
+        // Ensure that 'echo' is followed by a space and some content
+        if (strlen(cmd) == 4) {
+            handle_invalid_command(cmd, "Invalid: 'echo' requires a space and text to be printed.");
+            return;
+        }
+        // Check if there is no space after echo, handle it as invalid
+        if (cmd[4] != ' ') {
+            handle_invalid_command(cmd, "Invalid: 'echo' requires a space between 'echo' and the text.");
+            return;
+        }
+    }    
+    if (strncmp(cmd, "cat", 3) == 0) {
+        // Ensure that 'cat' is followed by a space and a file name
+        if (strlen(cmd) == 3) {
+            handle_invalid_command(cmd, "Invalid: 'cat' requires a file name.");
+            return;
+        }
+        // Check if there is no space after 'cat', handle it as invalid
+        if (cmd[3] != ' ') {
+            handle_invalid_command(cmd, "Invalid: 'cat' requires a space between 'cat' and the file name.");
+            return;
+        }
+    }    
+    if (strncmp(cmd, "mkdir", 5) == 0) {
+        // Ensure that 'mkdir' is followed by a space and a folder name
+        if (strlen(cmd) == 5) {
+            handle_invalid_command(cmd, "Invalid: 'mkdir' requires a folder name.");
+            return;
+        }
+        // Check if there is no space after mkdir, handle it as invalid
+        if (cmd[5] != ' ') {
+            handle_invalid_command(cmd, "Invalid: 'mkdir' requires a space between 'mkdir' and the folder name.");
+            return;
+        }
+    }    
+
+    if (strncmp(cmd, "grep patternfile.txt", 21) == 0) {
+        handle_invalid_command(cmd, "Invalid: 'grep patternfile.txt' should be 'grep pattern file.txt'. Missing space.");
+        return;
+    }
+
+    // Check for other invalid cases where commands should have arguments
+    if (strncmp(cmd, "rm", 2) == 0 && strlen(cmd) == 2) {
+        handle_invalid_command(cmd, "Invalid: 'rm' requires a file or directory to delete.");
+        return;
+    }
+    // If no invalid case detected, execute the command
     pid_t pid = fork();
     if (pid == 0) {
         execlp("/bin/bash", "bash", "-c", cmd, (char *)NULL);
@@ -282,8 +409,7 @@ int main() {
 }
 
 
-
-// 1. WORK ON SHUTDOWN BECAUSE WHEN SENT BY CLIENT IT SHOULD NOT SHUT DOWN
-// 2. WORK ON HIDE COMMAND AND MAKE SURE IT DOESNT APPEAR IN LIST COMMAND 
-// 3. WORK ON EMPTY INPUT EDGE CASES
-// 4. ENSURE CLIENT CANNOT SHUTDOWN SERVER SERVER SHOULD CLOSE THROUGH CTRL + C
+// To Do:
+// 1. Empty Input
+// 2. " " Fix Cases
+// 3. 

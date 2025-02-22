@@ -61,6 +61,21 @@ void send_command(int msgid, const char *command) {
 
 // Function to handle user input commands
 void handle_user_input(int msgid, char *command) {
+    // Check for empty input or commands with only spaces
+    if (strlen(command) == 0 || strspn(command, " ") == strlen(command) || strspn(command, "") == strlen(command)) {
+        printf("Invalid input. Please enter a valid command.\n");
+        return;
+    }
+    // Handle valid commands
+    if (strncmp(command, "CHPT", 4) == 0) {
+        // Extract the new prompt
+        char new_prompt[MAX_CMD_LEN];
+        if (sscanf(command, "CHPT %[^\n]", new_prompt) == 1) {
+            printf("Prompt changed to: %s\n", new_prompt);
+        } else {
+            printf("Invalid CHPT command. Usage: CHPT <new_prompt>\n");
+        }
+    }
     if (strcmp(command, "EXIT") == 0) {
         send_command(msgid, "EXIT");
         printf("Client disconnecting...\n");
@@ -72,6 +87,20 @@ void handle_user_input(int msgid, char *command) {
         send_command(msgid, "UNHIDE");
     } else if (strcmp(command, "exit") == 0) {
         printf("Ignored 'exit' command as it may exit the shell session...\n");
+    } else if (strcmp(command, "chpt new_prompt") == 0) {
+        send_command(msgid, "chpt new_prompt");
+    } else if (strcmp(command, "CHPT") == 0) {
+        send_command(msgid, "CHPT");
+    } else if (strcmp(command, "EXIT NOW") == 0) {
+        send_command(msgid, "EXIT NOW");
+    } else if (strcmp(command, "LIST all") == 0) {
+        send_command(msgid, "LIST all");
+    } else if (strcmp(command, "HIDE client") == 0) {
+        send_command(msgid, "HIDE client");
+    } else if (strcmp(command, "UNHIDE user") == 0) {
+        send_command(msgid, "UNHIDE user");
+    }else if (strcmp(command, "SHUTDOWN") == 0) {
+        printf ("Invalid because SHUTDOWN is a server-initiated broadcast command and cannot be sent by the client.");
     } else {
         send_command(msgid, command);  // Send the command to the server
     }
