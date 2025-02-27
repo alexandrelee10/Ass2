@@ -28,7 +28,7 @@ commands independently.
 #define MSG_QUEUE_KEY 12345
 #define MAX_CLIENTS 3
 #define TIMEOUT 3
-
+int msgid;
 // Message structure for the message queue
 struct msg_buffer {
     long msg_type;
@@ -65,7 +65,31 @@ int client_list[MAX_CLIENTS] = {0};
 
 // Signal handler for graceful shutdown
 void handle_signal(int sig) {
-    printf("Server shutting down...\n");
+    printf("\nServer shutting down...\n");
+
+    pthread_mutex_lock(&client_list_mutex);
+
+    // Send SHUTDOWN message to all clients
+    struct msg_buffer shutdown_msg;
+    shutdown_msg.msg_type = 1;  // Using 1 as broadcast type
+
+    strncpy(shutdown_msg.msg_text, "SHUTDOWN", MAX_CMD_LEN);
+
+    for (int i = 0; i < client_count; i++) {
+        shutdown_msg.msg_type = client_list[i];  // Send to each client individually
+        if (msgsnd(msgid, &shutdown_msg, sizeof(shutdown_msg) - sizeof(long), 0) == -1) {
+            perror("Failed to send shutdown message");
+        }
+    }
+
+    pthread_mutex_unlock(&client_list_mutex);
+
+    // Cleanup resources
+    if (msgctl(msgid, IPC_RMID, NULL) == -1) {
+        perror("msgctl (IPC_RMID) failed");
+    }
+
+    printf("All resources freed. Exiting...\n");
     exit(0);
 }
 
@@ -353,6 +377,30 @@ void execute_in_shell(char *cmd) {
             handle_invalid_command(cmd, "Invalid: 'cat' requires a space between 'cat' and the file name.");
             return;
         }
+    }
+    if (strncmp(cmd, "./", 2) == 0) {
+        // Extract the binary name
+        char binary[MAX_CMD_LEN];
+        sscanf(cmd, "./%s", binary);
+
+        // Check if the file exists and is executable
+        if (access(binary, X_OK) == 0) {
+            pid_t pid = fork();
+            if (pid == 0) {
+                execl(cmd, cmd, (char *)NULL);  // Execute the binary
+                perror("execl failed");
+                exit(1);
+            } else {
+                sleep(TIMEOUT);
+                if (waitpid(pid, NULL, WNOHANG) == 0) {
+                    kill(pid, SIGKILL);
+                    printf("Command Timeout: Killing process %d\n", pid);
+                }
+            }
+        } else {
+            handle_invalid_command(cmd, "Error: File does not exist or is not executable.");
+        }
+        return;
     }    
     if (strncmp(cmd, "mkdir", 5) == 0) {
         // Ensure that 'mkdir' is followed by a space and a folder name
